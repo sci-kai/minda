@@ -286,6 +286,7 @@ def _get_paired_info_dfs(info_df):
 
 
 def _check_df_order(df_1, df_2):
+    payload_columns = df_1.columns
     
     # row by row for start and end df, check that the order by sorting
     for i in range(len(df_1)):
@@ -301,12 +302,11 @@ def _check_df_order(df_1, df_2):
         order_df = pd.concat([row_1, row_2]).reset_index(drop=True)
         sorted_order_df =  _get_sorted_df(order_df)
     
-        # if sort is out of order, what the chrom & pos values of the start & end dfs
-        if order_df.equals(sorted_order_df) == False: 
-            df_1.at[i,'#CHROM'] = sorted_order_df.iloc[0]['#CHROM']
-            df_1.at[i, 'POS'] = sorted_order_df.iloc[0]['POS']
-            df_2.at[i,'#CHROM'] = sorted_order_df.iloc[1]['#CHROM']
-            df_2.at[i, 'POS'] = sorted_order_df.iloc[1]['POS']
+        # If out of order, copy full payloads (not only CHROM/POS) so
+        # ALT/INFO/ID stay consistent with the selected breakpoint side.
+        if order_df.equals(sorted_order_df) == False:
+            df_1.loc[df_1.index[i], payload_columns] = sorted_order_df.loc[0, payload_columns].values
+            df_2.loc[df_2.index[i], payload_columns] = sorted_order_df.loc[1, payload_columns].values
                        
     return df_1, df_2
 
