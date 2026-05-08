@@ -4,6 +4,7 @@ import logging
 import pandas as pd
 import numpy as np
 import gzip
+import re
 from collections import Counter
 from pybedtools import BedTool
 
@@ -170,6 +171,13 @@ def _get_alt_mate_index(df):
     return df
 
 
+def _replace_bnd_mate_locus(alt, mate_chrom, mate_pos):
+    alt = str(alt)
+    pattern = r'([][])([^:\[\]]+):(\d+)([][])'
+    replacement = rf'\1{mate_chrom}:{mate_pos}\4'
+    return re.sub(pattern, replacement, alt, count=1)
+
+
 def _get_paired_alt_dfs(alt_df):
     
     # check if BNDS are a single record or two
@@ -182,6 +190,12 @@ def _get_paired_alt_dfs(alt_df):
         alt_df_2 = alt_df.copy()  
         alt_df_2['#CHROM'] = alt_df_2.ALT.str.extract(r'(chr\w+|\w+):')[0].to_list()
         alt_df_2['POS'] = alt_df_2.ALT.str.extract(r':(\d+)')[0].astype(pd.Int64Dtype()).to_list() 
+        # Build reciprocal ALT for the synthetic mate-side row so each side
+        # points to the opposite breakpoint locus.
+        alt_df_2['ALT'] = [
+            _replace_bnd_mate_locus(alt, chrom, pos)
+            for alt, chrom, pos in zip(alt_df_2['ALT'], alt_df_1['#CHROM'], alt_df_1['POS'])
+        ]
         paired_alt_dfs = [alt_df_1, alt_df_2]
         logger.debug(f"(1) Number of alt/alt_1/alt_2 records: {alt_df.shape[0]} {alt_df_1.shape[0]} {alt_df_2.shape[0]}")
         logger.info(f"Number of paired records paired by ALT column: {alt_df_1.shape[0]} {alt_df_2.shape[0]}")
