@@ -291,7 +291,7 @@ def _get_paired_info_dfs(info_df):
     return info_df_1, info_df_2
 
 
-def _check_df_order(df_1, df_2):
+def _check_df_order(df_1, df_2, trace_swaps=None):
     
     # row by row for start and end df, check that the order by sorting
     for i in range(len(df_1)):
