@@ -4,10 +4,30 @@ import logging
 import pandas as pd
 import numpy as np
 import gzip
+import re
 from collections import Counter
 from pybedtools import BedTool
 
 logger = logging.getLogger()
+
+
+def _trace_enabled():
+    return os.environ.get('MINDA_DEBUG_TRACE', '0') == '1'
+
+
+def _trace_dir(out_dir, sample_name):
+    debug_dir = os.path.join(out_dir, f'{sample_name}_debug_traces')
+    os.makedirs(debug_dir, exist_ok=True)
+    return debug_dir
+
+
+def _trace_write_df(df, out_dir, sample_name, file_name):
+    if not _trace_enabled():
+        return
+    debug_dir = _trace_dir(out_dir, sample_name)
+    path = os.path.join(debug_dir, file_name)
+    df.to_csv(path, sep='\t', index=False)
+    logger.info(f"[TRACE] wrote {path} ({len(df)} rows)")
 
 
 def _is_vcf_gz(vcf):
@@ -287,13 +307,29 @@ def _check_df_order(df_1, df_2):
         order_df = pd.concat([row_1, row_2]).reset_index(drop=True)
         sorted_order_df =  _get_sorted_df(order_df)
     
-        # if sort is out of order, what the chrom & pos values of the start & end dfs
-        if order_df.equals(sorted_order_df) == False: 
+        if order_df.equals(sorted_order_df) == False:
+            # if sort is out of order, what the chrom & pos values of the start & end dfs
+            if trace_swaps is not None:
+                trace_swaps.append({
+                    'row_index': i,
+                    'start_before_chrom': order_df.iloc[0]['#CHROM'],
+                    'start_before_pos': order_df.iloc[0]['POS'],
+                    'start_before_alt': order_df.iloc[0]['ALT'],
+                    'end_before_chrom': order_df.iloc[1]['#CHROM'],
+                    'end_before_pos': order_df.iloc[1]['POS'],
+                    'end_before_alt': order_df.iloc[1]['ALT'],
+                    'start_after_chrom': sorted_order_df.iloc[0]['#CHROM'],
+                    'start_after_pos': sorted_order_df.iloc[0]['POS'],
+                    'start_after_alt': sorted_order_df.iloc[0]['ALT'],
+                    'end_after_chrom': sorted_order_df.iloc[1]['#CHROM'],
+                    'end_after_pos': sorted_order_df.iloc[1]['POS'],
+                    'end_after_alt': sorted_order_df.iloc[1]['ALT'],
+                })
             df_1.at[i,'#CHROM'] = sorted_order_df.iloc[0]['#CHROM']
             df_1.at[i, 'POS'] = sorted_order_df.iloc[0]['POS']
             df_2.at[i,'#CHROM'] = sorted_order_df.iloc[1]['#CHROM']
             df_2.at[i, 'POS'] = sorted_order_df.iloc[1]['POS']
-                       
+
     return df_1, df_2
 
 
@@ -336,6 +372,7 @@ def get_decomposed_dfs(caller_name, df, filter, min_size, prefixed, vaf, sample_
     
     # sort df
     df = _get_sorted_df(df)
+    _trace_write_df(df, out_dir, sample_name, f'decompose_{caller_name}_01_input_sorted.tsv')
 
     # change EVENTTYPE to SVTYPE (for GRIDSS/GRIPSS)
     # create SVTYPE column
@@ -364,10 +401,12 @@ def get_decomposed_dfs(caller_name, df, filter, min_size, prefixed, vaf, sample_
 
     # create paired ALT dfs
     alt_df = df[df['ALT'].str.contains(r'(?:chr)?\w+:\d+', na=False)].copy()
+    _trace_write_df(alt_df, out_dir, sample_name, f'decompose_{caller_name}_02_alt_candidates.tsv')
 
     #create paired INFO dfs
     info_df = df.drop(index=alt_df.index, errors='ignore') 
     logger.debug(f"Number of INFO records: {info_df.shape[0]}")
+    _trace_write_df(info_df, out_dir, sample_name, f'decompose_{caller_name}_03_info_candidates.tsv')
 
     # get ALT paired dfs
     paired_alt_dfs = _get_paired_alt_dfs(alt_df)
@@ -389,6 +428,8 @@ def get_decomposed_dfs(caller_name, df, filter, min_size, prefixed, vaf, sample_
     decomposed_df_1 = pd.concat(non_empty_1).sort_index()
     non_empty_2 = [df for df in [info_df_2, alt_df_2] if not df.empty]
     decomposed_df_2 = pd.concat(non_empty_2).sort_index()
+    _trace_write_df(decomposed_df_1, out_dir, sample_name, f'decompose_{caller_name}_04_start_preorder.tsv')
+    _trace_write_df(decomposed_df_2, out_dir, sample_name, f'decompose_{caller_name}_05_end_preorder.tsv')
 
     # write removed ids to txt
     singleton_id_set = set(decomposed_df_1.ID.to_list() + decomposed_df_2.ID.to_list())
@@ -399,7 +440,16 @@ def get_decomposed_dfs(caller_name, df, filter, min_size, prefixed, vaf, sample_
         written_count += 1
 
     # check that start and end record are in correct df
-    decomposed_df_1, decomposed_df_2 = _check_df_order(decomposed_df_1, decomposed_df_2)
+    trace_swaps = []
+    decomposed_df_1, decomposed_df_2 = _check_df_order(decomposed_df_1, decomposed_df_2, trace_swaps)
+    if _trace_enabled():
+        logger.info(f"[TRACE] {caller_name}: swapped {len(trace_swaps)} row pairs in _check_df_order")
+        if len(trace_swaps) > 0:
+            swaps_df = pd.DataFrame(trace_swaps)
+            _trace_write_df(swaps_df, out_dir, sample_name, f'decompose_{caller_name}_06_order_swaps.tsv')
+
+    _trace_write_df(decomposed_df_1, out_dir, sample_name, f'decompose_{caller_name}_07_start_postorder.tsv')
+    _trace_write_df(decomposed_df_2, out_dir, sample_name, f'decompose_{caller_name}_08_end_postorder.tsv')
 
     # write removed ids to txt
     order_id_set = set(decomposed_df_1.ID.to_list() + decomposed_df_2.ID.to_list())
@@ -450,6 +500,8 @@ def get_decomposed_dfs(caller_name, df, filter, min_size, prefixed, vaf, sample_
         written_count += 1
           
     logger.info(f"Total number of decomposed records: {decomposed_df_1.shape[0]} {decomposed_df_2.shape[0]}")
+    _trace_write_df(decomposed_df_1, out_dir, sample_name, f'decompose_{caller_name}_09_start_final.tsv')
+    _trace_write_df(decomposed_df_2, out_dir, sample_name, f'decompose_{caller_name}_10_end_final.tsv')
 
     if prefixed == True:
         prefix = caller_name.split('_', 1)[0]

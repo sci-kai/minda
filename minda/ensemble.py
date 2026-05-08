@@ -1,4 +1,5 @@
 import sys
+import os
 from ast import parse
 from collections import Counter
 from datetime import datetime
@@ -7,6 +8,25 @@ import numpy as np
 import re
 import gzip
 from minda.decompose import _is_vcf_gz
+
+
+def _trace_enabled():
+    return os.environ.get('MINDA_DEBUG_TRACE', '0') == '1'
+
+
+def _trace_dir(out_dir, sample_name):
+    debug_dir = os.path.join(out_dir, f'{sample_name}_debug_traces')
+    os.makedirs(debug_dir, exist_ok=True)
+    return debug_dir
+
+
+def _trace_write_df(df, out_dir, sample_name, file_name):
+    if not _trace_enabled():
+        return
+    debug_dir = _trace_dir(out_dir, sample_name)
+    path = os.path.join(debug_dir, file_name)
+    df.to_csv(path, sep='\t', index=False)
+    print(f"[TRACE] wrote {path} ({len(df)} rows)")
 
 def _get_strands_from_info(info):
     '''
@@ -66,23 +86,19 @@ def _add_columns(ensemble_df, vaf):
     key_columns = ['locus_group_x','locus_group_y']
     value_columns = ['ID_x', 'ID_y']
     column_suffixes = ['x','y']
-    
     for i in range(len(key_columns)):
         locus_group = key_columns[i]
         id = value_columns[i]
         column_suffix = column_suffixes[i]
-        
         keys =  ensemble_df[f'{locus_group}'].to_list()
         values = ensemble_df[f'{id}'].to_list()
         minda_values = ensemble_df['Minda_ID'].to_list()
         caller_names =  ensemble_df.caller_names.to_list()
-        
         id_dict = {}
         for key, value in zip(keys, values):
             if key not in id_dict:
                 id_dict[key] = []
             id_dict[key].append(value)
-    
         minda_id_dict = {}
         for key, value in zip(keys, minda_values):
             if key not in minda_id_dict:
@@ -91,8 +107,6 @@ def _add_columns(ensemble_df, vaf):
 
         ensemble_df[f'ID_list_{column_suffix}'] = ensemble_df[locus_group].map(id_dict)
         ensemble_df[f'Minda_ID_list_{column_suffix}'] = ensemble_df[locus_group].map(minda_id_dict)
-
-        
     # create dict for SV type
     values = ensemble_df.SVTYPE.to_list()
     svtype_dict = {}
@@ -100,7 +114,6 @@ def _add_columns(ensemble_df, vaf):
         if key not in svtype_dict:
             svtype_dict[key] = []
         svtype_dict[key].append(value)
-        
     most_common_svtpye_dict = {k:Counter(v).most_common(1)[0][0] for (k,v) in svtype_dict.items()}
     ensemble_df['SVTYPE'] = ensemble_df['locus_group_y'].map(most_common_svtpye_dict)
 
@@ -112,9 +125,7 @@ def _add_columns(ensemble_df, vaf):
             if key not in vaf_dict:
                 vaf_dict[key] = []
             vaf_dict[key].append(value)
-    
         ensemble_df['VAFs'] = ensemble_df['locus_group_y'].map(vaf_dict)
-    
     return ensemble_df
 
 
@@ -128,6 +139,7 @@ def _get_ensemble_df(decomposed_dfs_list, caller_names, tolerance, vaf, out_dir,
     start_dfs_list = []
     start_dfs = pd.concat(dfs_1).reset_index(drop=True)
     start_dfs = start_dfs[['#CHROM', 'POS', 'ID', 'Minda_ID', 'INFO', 'SVTYPE', 'SVLEN', 'REF', 'ALT']].sort_values(['#CHROM', 'POS'])
+    _trace_write_df(start_dfs, out_dir, sample_name, 'ensemble_01_start_concat.tsv')
     
     start_dfs['diff_x'] = start_dfs.groupby('#CHROM').POS.diff().fillna(9999)
     diffs = start_dfs['diff_x'].to_list()
@@ -150,9 +162,11 @@ def _get_ensemble_df(decomposed_dfs_list, caller_names, tolerance, vaf, out_dir,
 
     # create end dfs
     end_dfs = pd.concat(dfs_2).reset_index(drop=True)
+    _trace_write_df(end_dfs, out_dir, sample_name, 'ensemble_02_end_concat.tsv')
 
     #ensemble_df = start_dfs.merge(end_dfs, on=['SVTYPE', 'SVLEN','Minda_ID'])
     ensemble_df = start_dfs.merge(end_dfs, on=['SVTYPE', 'Minda_ID'])
+    _trace_write_df(ensemble_df, out_dir, sample_name, 'ensemble_03_xy_after_merge.tsv')
     ensemble_df = ensemble_df.sort_values(['locus_group_x','#CHROM_y', 'POS_y'])
     ensemble_df ['diff_y'] = ensemble_df.groupby(['locus_group_x','#CHROM_y']).POS_y.diff().abs().fillna(9999)
     diffs = ensemble_df['diff_y'].to_list()
@@ -199,6 +213,7 @@ def _get_ensemble_df(decomposed_dfs_list, caller_names, tolerance, vaf, out_dir,
         ensemble_df['VAF'] = np.nan
    
     ensemble_df = ensemble_df.drop_duplicates(['locus_group_x', 'locus_group_y']).reset_index(drop=True)
+    _trace_write_df(ensemble_df, out_dir, sample_name, 'ensemble_04_xy_after_grouping.tsv')
 
     return ensemble_df
 
@@ -276,6 +291,7 @@ def _get_ensemble_vcf(vcf_list, support_df, out_dir, sample_name, args, vaf, ver
     vcf_df['ID'] = f'Minda_' + (vcf_df.index + 1).astype(str)
     vcf_df['QUAL'] = "."
     vcf_df['FILTER'] = "PASS"
+    _trace_write_df(vcf_df, out_dir, sample_name, 'ensemble_07_vcf_rows_after_bnd_patch.tsv')
 
     if vaf != None:
         vcf_df['INFO'] = ['SVLEN=' + str(svlen) + ';SVTYPE=' + svtype + \
@@ -294,6 +310,7 @@ def _get_ensemble_vcf(vcf_list, support_df, out_dir, sample_name, args, vaf, ver
         vcf_df = (vcf_df[['#CHROM_x', 'POS_x', 'ID', 'REF_x', 'ALT_x', 'QUAL', 'FILTER','INFO']]
                   .rename(columns={'#CHROM_x':"#CHROM", "POS_x":"POS", "REF_x": "REF", "ALT_x": "ALT"}))
     date = datetime.today().strftime('%Y-%m-%d')
+    _trace_write_df(vcf_df, out_dir, sample_name, 'ensemble_08_vcf_rows_final_columns.tsv')
     with open(f'{out_dir}/{sample_name}_minda_ensemble.vcf', 'w') as file:
         file.write(f'##fileformat=VCFv4.2\n##fileDate={date}\n##source=MindaV{version}\n')
         command_str = " ".join(sys.argv)
@@ -316,6 +333,7 @@ def _get_ensemble_vcf(vcf_list, support_df, out_dir, sample_name, args, vaf, ver
 
 def get_support_df(vcf_list, decomposed_dfs_list, caller_names, tolerance, conditions, vaf, command, out_dir, sample_name, args, version, multimatch):
     ensemble_df = _get_ensemble_df(decomposed_dfs_list, caller_names, tolerance, vaf, out_dir, sample_name, args, multimatch)
+    _trace_write_df(ensemble_df, out_dir, sample_name, 'ensemble_05_xy_before_support_selection.tsv')
     
     minda_id_x_lists = ensemble_df.Minda_ID_list_x.to_list()
     minda_id_y_lists = ensemble_df.Minda_ID_list_y.to_list()
@@ -352,6 +370,7 @@ def get_support_df(vcf_list, decomposed_dfs_list, caller_names, tolerance, condi
     support_df = ensemble_df[column_names].rename(columns={"Minda_ID_list_y": "Minda_IDs"}).copy()
     #if command == "ensemble":
     support_df = _get_ensemble_call_column(support_df, conditions)
+    _trace_write_df(support_df, out_dir, sample_name, 'ensemble_06_support_df_with_ensemble_flag.tsv')
 
     # create ensemble vcf
     _get_ensemble_vcf(vcf_list, support_df, out_dir, sample_name, args, vaf, version)
